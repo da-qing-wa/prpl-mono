@@ -266,7 +266,7 @@ class KinRobot:
         )
 
     @property
-    def finger_vels(self) -> tuple[Vec2d, float]:
+    def finger_vel(self) -> tuple[Vec2d, float]:
         """Get the left finger linear and angular velocity."""
         return (
             self._left_finger_body.velocity,
@@ -304,21 +304,25 @@ class KinRobot:
         base_x: float,
         base_y: float,
         base_theta: float,
+        base_vel: tuple[Vec2d, float],
         arm_length: float,
+        arm_vel: tuple[Vec2d, float],
         gripper_gap: float,
+        gripper_vel: tuple[Vec2d, float],
+        helder_object_vels: list[Vec2d] | None = None,
     ) -> None:
         """Reset robot to specified positions with zero velocity."""
         self._base_body.position = (base_x, base_y)
-        self._base_body.velocity = (0.0, 0.0)
+        self._base_body.velocity = base_vel[0]
         self._base_body.angle = base_theta
-        self._base_body.angular_velocity = 0.0
+        self._base_body.angular_velocity = base_vel[1]
 
         base_to_gripper = SE2Pose(x=arm_length, y=0.0, theta=0.0)
         gripper_pose = self.base_pose * base_to_gripper
         self._gripper_base_body.position = (gripper_pose.x, gripper_pose.y)
-        self._gripper_base_body.velocity = (0.0, 0.0)
+        self._gripper_base_body.velocity = arm_vel[0]
         self._gripper_base_body.angle = gripper_pose.theta
-        self._gripper_base_body.angular_velocity = 0.0
+        self._gripper_base_body.angular_velocity = arm_vel[1]
 
         gripper_to_left_finger = SE2Pose(
             x=self.gripper_finger_width / 2,
@@ -327,22 +331,38 @@ class KinRobot:
         )
         left_finger_pose = gripper_pose * gripper_to_left_finger
         self._left_finger_body.position = (left_finger_pose.x, left_finger_pose.y)
-        self._left_finger_body.velocity = (0.0, 0.0)
+        self._left_finger_body.velocity = gripper_vel[0]
         self._left_finger_body.angle = left_finger_pose.theta
-        self._left_finger_body.angular_velocity = 0.0
+        self._left_finger_body.angular_velocity = gripper_vel[1]
+
+        # Reset held objects - they have the same velocity as gripper base
+        if helder_object_vels is not None and len(helder_object_vels):
+            assert len(helder_object_vels) == len(
+                self.held_objects
+            ), "Length of helder_object_vels must match the number of held objects."
+            for i, (obj, _, relative_pose) in enumerate(self.held_objects):
+                obj_body, _ = obj
+                new_obj_pose = gripper_pose * relative_pose
+                obj_body.position = (new_obj_pose.x, new_obj_pose.y)
+                obj_body.velocity = helder_object_vels[i]
+                obj_body.angular_velocity = self._gripper_base_body.angular_velocity
 
         # Update last state
         self.update_last_state()
 
     def revert_to_last_state(self) -> None:
-        """Reset to last state when collide with static objects."""
+        """Reset to last state and stay static when collide with static objects."""
         self._base_body.position = self._base_position
         self._base_body.angle = self._base_angle
+        self._base_body.velocity = Vec2d(0.0, 0.0)
+        self._base_body.angular_velocity = 0.0
 
         gripper_base_rel_pos = SE2Pose(x=self._arm_length, y=0.0, theta=0.0)
         gripper_base_pose = self.base_pose * gripper_base_rel_pos
         self._gripper_base_body.position = (gripper_base_pose.x, gripper_base_pose.y)
         self._gripper_base_body.angle = gripper_base_pose.theta
+        self._gripper_base_body.velocity = Vec2d(0.0, 0.0)
+        self._gripper_base_body.angular_velocity = 0.0
 
         left_finger_rel_pos = SE2Pose(
             x=self.gripper_finger_width / 2,
@@ -351,7 +371,9 @@ class KinRobot:
         )
         left_finger_pose = gripper_base_pose * left_finger_rel_pos
         self._left_finger_body.position = (left_finger_pose.x, left_finger_pose.y)
+        self._left_finger_body.velocity = Vec2d(0.0, 0.0)
         self._left_finger_body.angle = left_finger_pose.theta
+        self._left_finger_body.angular_velocity = 0.0
 
         # Update held objects
         for obj, _, relative_pose in self.held_objects:
@@ -359,6 +381,8 @@ class KinRobot:
             new_obj_pose = gripper_base_pose * relative_pose
             obj_body.position = (new_obj_pose.x, new_obj_pose.y)
             obj_body.angle = new_obj_pose.theta
+            obj_body.velocity = Vec2d(0.0, 0.0)
+            obj_body.angular_velocity = 0.0
 
     def update_last_state(self) -> None:
         """Update the last state tracking variables."""
@@ -448,6 +472,13 @@ class KinRobot:
         relative_obj_pose = gripper_base_pose.inverse * obj_pose
         self.held_objects.append((obj, mass, relative_obj_pose))
 
+    def body_in_hand(self, body_id: int) -> bool:
+        """Check if a body is in the robot's hand."""
+        for (obj_body, _), _, _ in self.held_objects:
+            if obj_body.id == body_id:
+                return True
+        return False
+
 
 class PDController:
     """A simple PD controller for the robot."""
@@ -490,7 +521,7 @@ class PDController:
 
         # If available (recommended), provide current gripper opening and its rate:
         g_curr = robot.curr_gripper  # opening distance
-        finger_vel_abs_w = robot.finger_vels[0]  # Vec2d
+        finger_vel_abs_w = robot.finger_vel[0]  # Vec2d
 
         # === 1) Base PD ===
         base_pos_tgt = Vec2d(tgt_x, tgt_y)
@@ -645,6 +676,7 @@ def create_walls_from_world_boundaries(
         "theta": 0.0,
         "omega": 0.0,
         "static": True,
+        "held": False,
         "color_r": BLACK[0],
         "color_g": BLACK[1],
         "color_b": BLACK[2],
@@ -662,6 +694,7 @@ def create_walls_from_world_boundaries(
         "theta": 0.0,
         "omega": 0.0,
         "static": True,
+        "held": False,
         "color_r": BLACK[0],
         "color_g": BLACK[1],
         "color_b": BLACK[2],
@@ -680,6 +713,7 @@ def create_walls_from_world_boundaries(
         "theta": 0.0,
         "omega": 0.0,
         "static": True,
+        "held": False,
         "color_r": BLACK[0],
         "color_g": BLACK[1],
         "color_b": BLACK[2],
@@ -697,6 +731,7 @@ def create_walls_from_world_boundaries(
         "theta": 0.0,
         "omega": 0.0,
         "static": True,
+        "held": False,
         "color_r": BLACK[0],
         "color_g": BLACK[1],
         "color_b": BLACK[2],

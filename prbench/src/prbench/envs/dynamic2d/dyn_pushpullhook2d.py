@@ -35,6 +35,7 @@ from prbench.envs.utils import (
     BLACK,
     BROWN,
     ORANGE,
+    object_to_multibody2d,
     sample_se2_pose,
     state_2d_has_collision,
 )
@@ -99,7 +100,7 @@ class DynPushPullHook2DEnvConfig(Dynamic2DRobotEnvConfig):
         0.0,
     )
     middle_wall_width: float = world_max_x - world_min_x
-    middle_wall_height: float = 0.02
+    middle_wall_height: float = 0.05
 
     # Hook hyperparameters.
     hook_rgb: tuple[float, float, float] = BROWN
@@ -516,8 +517,8 @@ class ObjectCentricDynPushPullHook2DEnv(
                     shape.elasticity = 0.99
                     shape.collision_type = STATIC_COLLISION_TYPE
                     self.pymunk_space.add(b2, shape)
-                    b2.position = x, y
                     b2.angle = theta
+                    b2.position = x, y
                     self._state_obj_to_pymunk_body[obj] = b2
                 elif obj.is_instance(DynRectangleType):
                     # Target block and obstructions
@@ -542,8 +543,8 @@ class ObjectCentricDynPushPullHook2DEnv(
                     shape.body.moment = moment
                     shape.body.mass = mass
                     self.pymunk_space.add(body, shape)
-                    body.position = x, y
                     body.angle = theta
+                    body.position = x, y
                     body.velocity = vx, vy
                     body.angular_velocity = omega
                     self._state_obj_to_pymunk_body[obj] = body
@@ -600,8 +601,8 @@ class ObjectCentricDynPushPullHook2DEnv(
                         shape2.body.moment = moment2
                         shape2.body.mass = mass
                         self.pymunk_space.add(body, shape1, shape2)
-                        body.position = x, y
                         body.angle = theta
+                        body.position = x, y
                         body.velocity = vx, vy
                         body.angular_velocity = omega
                         self._state_obj_to_pymunk_body[obj] = body
@@ -618,8 +619,8 @@ class ObjectCentricDynPushPullHook2DEnv(
                         shape2.density = 1.0
                         shape2.collision_type = ROBOT_COLLISION_TYPE
                         self.pymunk_space.add(body, shape1, shape2)
-                        body.position = x, y
                         body.angle = theta
+                        body.position = x, y
                         body.velocity = vx, vy
                         body.angular_velocity = omega
                         # Add to robot hand
@@ -693,12 +694,13 @@ class ObjectCentricDynPushPullHook2DEnv(
         ][0]
         full_state = state.copy()
         full_state.data.update(self.initial_constant_state.data)
-        if state_2d_has_collision(
-            full_state,
-            {target_block},
-            {middle_wall},
-            static_object_body_cache,
-        ):
+        target_block_body = object_to_multibody2d(
+            target_block, full_state, static_object_body_cache
+        )
+        middle_wall_body = object_to_multibody2d(
+            middle_wall, full_state, static_object_body_cache
+        )
+        if target_block_body.bodies[0].geom.intersects(middle_wall_body.bodies[0].geom):
             return True
 
         return False

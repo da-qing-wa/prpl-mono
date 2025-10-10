@@ -1,7 +1,6 @@
 """Basic tests for the TidyBot3D environment observation and action space validity,
 step, and reset."""
 
-import numpy as np
 from relational_structs import ObjectCentricState
 
 from prbench.envs.tidybot.mujoco_utils import MjAct
@@ -33,7 +32,7 @@ def test_tidybot3d_step():
     obs, _ = env.reset()
     action = env.action_space.sample()
     next_obs, _, _, _, _ = env.step(action)
-    assert not np.allclose(obs["vec"], next_obs["vec"])
+    assert not obs.allclose(next_obs, atol=1e-6)
     env.close()
 
 
@@ -82,7 +81,11 @@ def test_tidybot3d_get_object_pos_quat():
     env = TidyBot3DEnv(num_objects=3, render_images=False)
     env.reset()
     for obj in env._objects:  # pylint: disable=protected-access
-        pos, quat = env.get_joint_pos_quat(obj.joint_name)
+        pos, quat = (
+            env._robot_env.get_joint_pos_quat(  # pylint: disable=protected-access
+                obj.joint_name
+            )
+        )
         assert len(pos) == 3, "Position should have 3 elements"
         assert len(quat) == 4, "Quaternion should have 4 elements"
     env.close()
@@ -94,13 +97,21 @@ def test_tidybot3d_set_get_object_pos_quat_consistency():
     env = TidyBot3DEnv(num_objects=3, render_images=False)
     env.reset()
     for obj in env._objects:  # pylint: disable=protected-access
-        original_pos, original_quat = env.get_joint_pos_quat(obj.joint_name)
+        original_pos, original_quat = (
+            env._robot_env.get_joint_pos_quat(  # pylint: disable=protected-access
+                obj.joint_name
+            )
+        )
         new_pos = [p + 0.1 for p in original_pos]
         new_quat = original_quat  # Keep orientation the same for simplicity
-        env.set_joint_pos_quat(  # pylint: disable=protected-access
+        env._robot_env.set_joint_pos_quat(  # pylint: disable=protected-access
             obj.joint_name, new_pos, new_quat
         )
-        updated_pos, updated_quat = env.get_joint_pos_quat(obj.joint_name)
+        updated_pos, updated_quat = (
+            env._robot_env.get_joint_pos_quat(  # pylint: disable=protected-access
+                obj.joint_name
+            )
+        )
         assert all(
             abs(o - u) < 1e-5 for o, u in zip(new_pos, updated_pos)
         ), "Position not set correctly"
@@ -131,7 +142,7 @@ def test_tidybot3d_env_object_centric_state():
     num_objects = 3
     env = TidyBot3DEnv(num_objects=num_objects, render_images=False)
     obs, _ = env.reset()
-    object_centric_state = obs.get("object_centric_state", {})
+    object_centric_state = obs
     assert isinstance(
         object_centric_state, ObjectCentricState
     ), "Object-centric state should be a dict"

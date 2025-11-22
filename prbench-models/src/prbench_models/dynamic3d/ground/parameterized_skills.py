@@ -74,7 +74,7 @@ class MoveToTargetGroundController(
 
     The object parameters are:
         robot: The robot itself.
-        object: The target object (cube).
+        object: The target object.
 
     The continuous parameters are:
         target_distance: float
@@ -110,7 +110,7 @@ class MoveToTargetGroundController(
         self._current_params = params.copy()
         # Derive the target pose for the robot.
         target_distance, target_rot = self._current_params
-        target_object = x.get_object_from_name("cube1")
+        target_object = self.objects[1]
         target_object_pose = get_overhead_object_se2_pose(x, target_object)
         target_base_pose = get_target_robot_pose_from_parameters(
             target_object_pose, target_distance, target_rot

@@ -8,6 +8,7 @@ from typing import Iterator, NamedTuple
 import numpy as np
 import numpy.typing as npt
 import pybullet as p
+from prpl_utils.utils import get_signed_angle_distance, wrap_angle
 from pybullet_utils.transformations import (
     euler_from_quaternion,
     quaternion_from_euler,
@@ -101,6 +102,20 @@ class SE2Pose:
     def identity(cls) -> SE2Pose:
         """Unit pose."""
         return cls(0.0, 0.0, 0.0)
+
+    def __add__(self, other: SE2Pose) -> SE2Pose:
+        """Add two SE2 poses."""
+        return SE2Pose(
+            self.x + other.x, self.y + other.y, wrap_angle(self.rot + other.rot)
+        )
+
+    def __sub__(self, other: SE2Pose) -> SE2Pose:
+        """Subtract two SE2 poses."""
+        return SE2Pose(
+            self.x - other.x,
+            self.y - other.y,
+            get_signed_angle_distance(self.rot, other.rot),
+        )
 
 
 def multiply_poses(*poses: Pose) -> Pose:

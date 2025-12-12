@@ -13,7 +13,7 @@ import numpy as np
 import pybullet as p
 from numpy.typing import NDArray
 from pybullet_helpers.camera import capture_image
-from pybullet_helpers.geometry import Pose, get_pose, multiply_poses, set_pose
+from pybullet_helpers.geometry import Pose, SE2Pose, get_pose, multiply_poses, set_pose
 from pybullet_helpers.gui import create_gui_connection
 from pybullet_helpers.inverse_kinematics import (
     check_body_collisions,
@@ -21,7 +21,7 @@ from pybullet_helpers.inverse_kinematics import (
     set_robot_joints_with_held_object,
 )
 from pybullet_helpers.joint import JointPositions
-from pybullet_helpers.robots import create_pybullet_robot
+from pybullet_helpers.robots import create_pybullet_mobile_robot
 from pybullet_helpers.robots.single_arm import FingeredSingleArmPyBulletRobot
 from relational_structs import (
     Array,
@@ -42,6 +42,7 @@ from prbench.envs.geom3d.utils import (
     Geom3DObjectCentricState,
     Geom3DRobotActionSpace,
     extend_joints_to_include_fingers,
+    get_robot_action_from_gui_input,
     remove_fingers_from_extended_joints,
 )
 
@@ -51,8 +52,9 @@ class Geom3DEnvConfig(PRBenchEnvConfig):
     """Config for Geom3DEnv()."""
 
     # Robot.
-    robot_name: str = "kinova-gen3"
-    robot_base_pose: Pose = Pose.identity()
+    robot_name: str = "tidybot-kinova"
+    robot_base_home_pose: SE2Pose = SE2Pose.identity()
+    robot_base_z: float = 0.0
     initial_joints: JointPositions = field(
         # This is a retract position.
         default_factory=lambda: [
@@ -71,7 +73,7 @@ class Geom3DEnvConfig(PRBenchEnvConfig):
     max_action_mag: float = 0.05
 
     # This is used to check whether a grasped object can be placed on a surface.
-    min_placement_dist: float = 1e-3
+    min_placement_dist: float = 5e-3
 
     # For rendering.
     render_dpi: int = 300
@@ -82,7 +84,11 @@ class Geom3DEnvConfig(PRBenchEnvConfig):
     def get_camera_kwargs(self) -> dict[str, Any]:
         """Get kwargs to pass to PyBullet camera."""
         return {
-            "camera_target": self.robot_base_pose.position,
+            "camera_target": (
+                self.robot_base_home_pose.x,
+                self.robot_base_home_pose.y,
+                self.robot_base_z,
+            ),
             "camera_yaw": 90,
             "camera_distance": 1.5,
             "camera_pitch": -20,
@@ -112,17 +118,16 @@ class ObjectCentricGeom3DRobotEnv(
             self.physics_client_id = p.connect(p.DIRECT)
 
         # Create robot.
-        robot = create_pybullet_robot(
+        robot = create_pybullet_mobile_robot(
             self.config.robot_name,
             self.physics_client_id,
-            base_pose=self.config.robot_base_pose,
-            control_mode="reset",
-            home_joint_positions=extend_joints_to_include_fingers(
-                self.config.initial_joints
-            ),
+            base_z=self.config.robot_base_z,
+            base_home_pose=self.config.robot_base_home_pose,
         )
-        assert isinstance(robot, FingeredSingleArmPyBulletRobot)
         self.robot = robot
+        self.robot.arm.set_joints(
+            extend_joints_to_include_fingers(self.config.initial_joints)
+        )
 
         # Show a visualization of the end effector.
         visual_id = p.createVisualShape(
@@ -140,7 +145,7 @@ class ObjectCentricGeom3DRobotEnv(
         )
 
         # Create the body for the end effector.
-        end_effector_pose = self.robot.get_end_effector_pose()
+        end_effector_pose = self.robot.arm.get_end_effector_pose()
         self.end_effector_viz_id = p.createMultiBody(
             baseMass=0,
             baseCollisionShapeIndex=collision_id,
@@ -202,6 +207,23 @@ class ObjectCentricGeom3DRobotEnv(
     def _get_half_extents(self, object_name: str) -> tuple[float, float, float]:
         """Get the half extents for a cuboid object."""
 
+    def _get_triangle_features(
+        self, object_name: str
+    ) -> tuple[float, float, float, float]:
+        """Return triangle parameters (side_a, side_b, depth, triangle_type).
+
+        Subclasses that support triangles should override this. The default
+        implementation returns zeros to provide a safe fallback for serialization.
+        """
+        assert object_name is not None
+        return 0.0, 0.0, 0.0, 0.0
+
+    @property
+    def _robot_arm(self) -> FingeredSingleArmPyBulletRobot:
+        robot_arm = self.robot.arm
+        assert isinstance(robot_arm, FingeredSingleArmPyBulletRobot)
+        return robot_arm
+
     @property
     def _grasped_object_id(self) -> int | None:
         if self._grasped_object is not None:
@@ -240,7 +262,9 @@ class ObjectCentricGeom3DRobotEnv(
         # Reset the robot. In the future, we may want to allow randomizing the initial
         # robot joint positions.
         self._set_robot_and_held_object(
-            self.config.initial_joints, self.config.initial_finger_state
+            self.config.robot_base_home_pose,
+            self.config.initial_joints,
+            self.config.initial_finger_state,
         )
 
         # Reset objects.
@@ -253,42 +277,56 @@ class ObjectCentricGeom3DRobotEnv(
 
         This is useful when treating the environment as a simulator.
         """
-        self._set_robot_and_held_object(obs.joint_positions, obs.finger_state)
+        self._set_robot_and_held_object(
+            obs.base_pose, obs.joint_positions, obs.finger_state
+        )
         self._grasped_object = obs.grasped_object
         self._grasped_object_transform = obs.grasped_object_transform
         self._set_object_states(obs)
 
     def step(self, action: Array) -> tuple[_ObsType, float, bool, bool, dict]:
+        # execute the base action
+        base_action = action[:3]
+        current_base_pose = self.robot.get_base()
+        next_base_pose = current_base_pose + SE2Pose(
+            base_action[0], base_action[1], base_action[2]
+        )
+
         # Store the current robot joints because we may need to revert in collision.
         current_joints = remove_fingers_from_extended_joints(
-            self.robot.get_joint_positions()
+            self._robot_arm.get_joint_positions()
         )
-        current_finger_state = self.robot.get_finger_state()
+        current_finger_state = self._robot_arm.get_finger_state()
 
         # Tentatively apply robot action.
-        delta_arm_joints = action[:7]
+        delta_arm_joints = action[-8:-1]
         # Clip the action to be within the allowed limits.
         delta_joints = np.clip(
             delta_arm_joints,
             -self.config.max_action_mag,
             self.config.max_action_mag,
         )
+
         next_joints = np.clip(
             current_joints + delta_joints,
-            self.robot.joint_lower_limits[:7],
-            self.robot.joint_upper_limits[:7],
+            self._robot_arm.joint_lower_limits[:7],
+            self._robot_arm.joint_upper_limits[:7],
         ).tolist()
-        self._set_robot_and_held_object(next_joints, current_finger_state)
+        self._set_robot_and_held_object(
+            next_base_pose, next_joints, current_finger_state
+        )
 
         # Check for collisions.
         if self._robot_or_held_object_collision_exists():
             # Revert!
-            self._set_robot_and_held_object(current_joints, current_finger_state)
+            self._set_robot_and_held_object(
+                current_base_pose, current_joints, current_finger_state
+            )
 
         # Check for grasping.
-        if action[7] < -0.5:
+        if action[-1] < -0.5:
             gripper_action = "close"
-        elif action[7] > 0.5:
+        elif action[-1] > 0.5:
             gripper_action = "open"
         else:
             gripper_action = "none"
@@ -313,7 +351,7 @@ class ObjectCentricGeom3DRobotEnv(
                 self._grasped_object = next(iter(objects_in_grasp_zone))
                 assert self._grasped_object_id is not None
                 # Create grasp transform.
-                world_to_robot = self.robot.get_end_effector_pose()
+                world_to_robot = self.robot.arm.get_end_effector_pose()
                 world_to_object = get_pose(
                     self._grasped_object_id, self.physics_client_id
                 )
@@ -322,17 +360,19 @@ class ObjectCentricGeom3DRobotEnv(
                 )
                 # Close the fingers until they are touching the object.
                 while not check_body_collisions(
-                    self._grasped_object_id, self.robot.robot_id, self.physics_client_id
+                    self._grasped_object_id,
+                    self.robot.arm.robot_id,
+                    self.physics_client_id,
                 ):
                     # If the fingers are fully closed, stop.
-                    current_finger_state = self.robot.get_finger_state()
-                    closed_finger_state = self.robot.closed_fingers_state
+                    current_finger_state = self._robot_arm.get_finger_state()
+                    closed_finger_state = self._robot_arm.closed_fingers_state
                     assert isinstance(current_finger_state, float)
                     assert isinstance(closed_finger_state, float)
                     if current_finger_state >= closed_finger_state - 1e-2:
                         break
                     next_finger_state = current_finger_state + 1e-2
-                    self.robot.set_finger_state(next_finger_state)
+                    self._robot_arm.set_finger_state(next_finger_state)
 
         # Check for ungrasping.
         elif gripper_action == "open" and self._grasped_object_id is not None:
@@ -345,7 +385,7 @@ class ObjectCentricGeom3DRobotEnv(
             if surface_supports:
                 self._grasped_object = None
                 self._grasped_object_transform = None
-                self.robot.open_fingers()
+                self._robot_arm.open_fingers()
 
         reward = -1
         terminated = self._goal_reached()
@@ -360,20 +400,22 @@ class ObjectCentricGeom3DRobotEnv(
         )
 
     def _set_robot_and_held_object(
-        self, joints: JointPositions, finger_state: float
+        self, base_pose: SE2Pose, joints: JointPositions, finger_state: float
     ) -> None:
+        # First handle the base pose.
+        self.robot.set_base(base_pose)
         # First handle the robot arm joints.
         set_robot_joints_with_held_object(
-            self.robot,
+            self._robot_arm,
             self.physics_client_id,
             self._grasped_object_id,
             self._grasped_object_transform,
             extend_joints_to_include_fingers(joints),
         )
         # Now handle the fingers.
-        self.robot.set_finger_state(finger_state)
+        self._robot_arm.set_finger_state(finger_state)
         # Update the end effector visualization.
-        end_effector_pose = self.robot.get_end_effector_pose()
+        end_effector_pose = self._robot_arm.get_end_effector_pose()
         set_pose(self.end_effector_viz_id, end_effector_pose, self.physics_client_id)
 
     def _robot_or_held_object_collision_exists(self) -> bool:
@@ -381,12 +423,12 @@ class ObjectCentricGeom3DRobotEnv(
         if self._grasped_object_id is not None:
             collision_bodies.discard(self._grasped_object_id)
         return check_collisions_with_held_object(
-            self.robot,
+            self.robot.arm,
             collision_bodies,
             self.physics_client_id,
             self._grasped_object_id,
             self._grasped_object_transform,
-            self.robot.get_joint_positions(),
+            self.robot.arm.get_joint_positions(),
         )
 
     def _get_surfaces_supporting_object(self, object_id: int) -> set[int]:
@@ -409,14 +451,19 @@ class ObjectCentricGeom3DRobotEnv(
             feats: dict[str, float] = {}
             # Handle robots.
             if object_type == Geom3DRobotType:
+                # Add base pose.
+                base_pose = self.robot.get_base()
+                feats["pos_base_x"] = base_pose.x
+                feats["pos_base_y"] = base_pose.y
+                feats["pos_base_rot"] = base_pose.rot
                 # Add joints.
                 joints = remove_fingers_from_extended_joints(
-                    self.robot.get_joint_positions()
+                    self._robot_arm.get_joint_positions()
                 )
                 for i, v in enumerate(joints):
                     feats[f"joint_{i+1}"] = v
                 # Add finger state.
-                feats["finger_state"] = self.robot.get_finger_state()
+                feats["finger_state"] = self._robot_arm.get_finger_state()
                 # Add grasp.
                 grasp_tf_feat_names = [
                     "grasp_tf_x",
@@ -469,6 +516,7 @@ class ObjectCentricGeom3DRobotEnv(
                     half_extent_names, half_extents, strict=True
                 ):
                     feats[feat_name] = feat
+                feats["object_type"] = -1.0  # cuboid
             # Handle points.
             elif object_type == Geom3DPointType:
                 # Add position.
@@ -482,3 +530,11 @@ class ObjectCentricGeom3DRobotEnv(
             # Add feats to state dict.
             state_dict[obj] = feats
         return state_dict
+
+    def get_action_from_gui_input(
+        self, gui_input: dict[str, Any]
+    ) -> NDArray[np.float32]:
+        """Get the mapping from human inputs to actions."""
+        # This will be implemented later
+        assert isinstance(self.action_space, Geom3DRobotActionSpace)
+        return get_robot_action_from_gui_input(self.action_space, gui_input)
